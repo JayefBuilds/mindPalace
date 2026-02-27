@@ -1,0 +1,10 @@
+# Run garbage collection weekly on Sunday at 3am
+# Adjust agent IDs to match your projects
+# Dry run first week, then switch to --execute when confident
+
+# Example for a single project:
+# 0 3 * * 0 cd /path/to/mem0_enhanced && python scripts/gc.py my-project --execute >> /var/log/mem0-gc.log 2>&1
+
+# Example for multiple projects:
+# 0 3 * * 0 cd /path/to/mem0_enhanced && python scripts/gc.py project-a --execute >> /var/log/mem0-gc.log 2>&1
+# 5 3 * * 0 cd /path/to/mem0_enhanced && python scripts/gc.py project-b --execute >> /var/log/mem0-gc.log 2>&1

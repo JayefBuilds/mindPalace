@@ -1,0 +1,53 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/mem0graph
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+    restart: unless-stopped
+
+  mcp:
+    build: .
+    stdin_open: true
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+      - neo4j
+    environment:
+      MEM0_QDRANT_URL: http://qdrant:6333
+      MEM0_NEO4J_URL: bolt://neo4j:7687
+      MEM0_NEO4J_PASSWORD: mem0graph
+      MEM0_OLLAMA_URL: http://host.docker.internal:11434
+      MEM0_AGENT_ID: ${MEM0_AGENT_ID:-}
+      MEM0_LLM_PROVIDER: anthropic
+      MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-claude-haiku-4-5-20251001}
+      MEM0_EMBEDDING_MODEL: ${MEM0_EMBEDDING_MODEL:-nomic-embed-text}
+      MEM0_ENABLE_GRAPH: ${MEM0_ENABLE_GRAPH:-false}
+      MEM0_ENABLE_RERANKER: ${MEM0_ENABLE_RERANKER:-true}
+      MEM0_ENABLE_REWRITER: ${MEM0_ENABLE_REWRITER:-true}
+      MEM0_FINAL_LIMIT: ${MEM0_FINAL_LIMIT:-5}
+      # Auth: set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .env
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - token_logs:/root/.mem0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  qdrant_data:
+  neo4j_data:
+  token_logs:

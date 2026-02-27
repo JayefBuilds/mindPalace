@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+
+# Env / secrets
+.env
+
+# Build artifacts
+dist/
+build/
+
+# Runtime state
+.qdrant-initialized
+.migration_checkpoint.json
+snapshots/
+
+# OS
+.DS_Store
