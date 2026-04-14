@@ -70,6 +70,8 @@ claude setup-token   # run on any machine logged into Claude Code
 export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 ```
 
+> **Note:** It's unclear whether using a Claude.ai OAuth token for programmatic/agent use is permitted under Anthropic's Terms of Service. Use at your own discretion — Option A (API key) is the safe choice.
+
 `ANTHROPIC_API_KEY` takes priority over `CLAUDE_CODE_OAUTH_TOKEN` if both are set.
 
 ---
