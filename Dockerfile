@@ -14,7 +14,14 @@ RUN uv pip install --system \
     "mcp>=1.0" \
     "anthropic>=0.80" \
     "ollama" \
-    "qdrant-client"
+    "qdrant-client" \
+    "langchain-neo4j" \
+    "rank-bm25"
+
+# Apply patches to mem0ai for Anthropic API compatibility
+# Fixes: temperature+top_p conflict, tool format (function→custom), tool_choice dict format, tool_use response format
+COPY patches/mem0_anthropic_llm.py .
+RUN cp mem0_anthropic_llm.py $(python -c "import mem0.llms.anthropic as m; print(m.__file__)")
 
 # Copy source
 COPY src/ src/

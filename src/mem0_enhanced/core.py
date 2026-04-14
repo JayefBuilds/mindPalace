@@ -10,6 +10,7 @@ Wraps Mem0's Memory class and adds:
 - End-of-session memory extraction
 - Garbage collection scheduling
 - Token consumption tracking
+- Graph extraction via our own LLM client (works with OAuth and API keys)
 """
 
 import logging
@@ -28,6 +29,7 @@ from .decay import DecayScorer, GarbageCollector
 from .session_extractor import SessionExtractor
 from .auto_typer import AutoTyper
 from .token_logger import TokenLogger
+from .graph_extractor import GraphExtractor
 from .types import ScoredMemory
 
 logger = logging.getLogger(__name__)
@@ -37,12 +39,20 @@ class EnhancedMemory:
     def __init__(self, config: Optional[EnhancedMemoryConfig] = None):
         self.config = config or EnhancedMemoryConfig.from_env()
 
-        # OAuth tokens (Claude.ai subscription) don't support custom function tools,
-        # which graph memory requires. Auto-disable graph when using OAuth.
+        # Save whether graph was requested before any OAuth override.
+        # We'll use this to initialize our own GraphExtractor independently of Mem0.
+        _graph_requested = self.config.enable_graph
+
+        # OAuth tokens don't support Anthropic tool-calling, which Mem0's internal
+        # graph extraction requires. Disable graph for Mem0 when using OAuth —
+        # our GraphExtractor handles it instead via plain-text prompts.
+        # Always patch tool_choice string→dict coercion (mem0 sends "auto", API wants {"type":"auto"})
+        self._patch_mem0_tool_choice()
+
         oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-        if oauth_token:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if oauth_token and not api_key:
             if self.config.enable_graph:
-                logger.info("OAuth token detected: disabling graph memory (not supported with OAuth auth)")
                 self.config.enable_graph = False
             self._patch_mem0_anthropic_client(oauth_token)
 
@@ -83,6 +93,14 @@ class EnhancedMemory:
 
         self.extractor = SessionExtractor(self.llm)
         self.auto_typer = AutoTyper(self.llm)
+
+        # Custom graph extractor — uses our LLM client, works with OAuth and API keys alike.
+        # Initialized whenever graph was originally requested, regardless of OAuth.
+        self.graph_extractor = (
+            GraphExtractor(self.llm, self.config.neo4j_url, self.config.neo4j_password)
+            if _graph_requested
+            else None
+        )
 
     @staticmethod
     def _patch_mem0_anthropic_client(oauth_token: str):
@@ -136,6 +154,146 @@ class EnhancedMemory:
         mem0_anthropic_module.AnthropicLLM.__init__ = _patched_init
         mem0_anthropic_module.AnthropicLLM.generate_response = _patched_generate
 
+    @staticmethod
+    def _patch_mem0_tool_choice():
+        """
+        Patch Mem0's AnthropicLLM.generate_response to coerce string tool_choice
+        values to the dict form the API requires. Applies unconditionally — mem0
+        passes tool_choice='auto' (string) but Anthropic expects {'type': 'auto'}.
+        """
+        from mem0.llms import anthropic as mem0_anthropic_module
+
+        if getattr(mem0_anthropic_module.AnthropicLLM, "_tool_choice_patched", False):
+            return  # already patched
+
+        _original_generate = mem0_anthropic_module.AnthropicLLM.generate_response
+
+        def _patched_generate(self, messages, response_format=None, tools=None, tool_choice="auto", **kwargs):
+            if isinstance(tool_choice, str):
+                tool_choice = {"type": tool_choice}
+            return _original_generate(self, messages, response_format, tools, tool_choice, **kwargs)
+
+        mem0_anthropic_module.AnthropicLLM.generate_response = _patched_generate
+        mem0_anthropic_module.AnthropicLLM._tool_choice_patched = True
+
+    def list_agents(self) -> list[dict]:
+        """
+        List all agent_ids that have memories in Qdrant, with memory counts.
+        Scrolls the entire mem0 collection and aggregates by agent_id payload field.
+        """
+        from qdrant_client.models import ScrollRequest
+
+        agents: dict[str, int] = {}
+        offset = None
+
+        while True:
+            results, next_offset = self.qdrant.scroll(
+                collection_name="mem0",
+                limit=500,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in results:
+                payload = point.payload or {}
+                aid = payload.get("agent_id") or payload.get("user_id")
+                if aid:
+                    agents[aid] = agents.get(aid, 0) + 1
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        return [{"agent_id": k, "count": v} for k, v in sorted(agents.items())]
+
+    def rename_agent(self, old_id: str, new_id: str, registry_path: Optional[str] = None) -> dict:
+        """
+        Migrate all memories from old_id to new_id.
+
+        Steps:
+        1. Fetch all memories for old_id (using original case for Qdrant query)
+        2. Write each directly to mem0 under new_id (bypasses LLM dedup — safe for migration)
+        3. Delete originals from Qdrant via mem0
+        4. Update registry.json if path provided
+
+        Returns a summary dict.
+        """
+        import json as _json
+
+        new_id = new_id.lower()
+
+        # Block only if old and new are literally the same string (already lowercase)
+        if old_id == new_id:
+            return {"migrated": 0, "deleted": 0, "message": "old_id and new_id are the same"}
+
+        # Fetch all memories using original case (Qdrant stores agent_id as-is)
+        raw = self.mem0.get_all(agent_id=old_id, user_id=old_id)
+        memories = [
+            m for m in raw.get("results", [])
+            if m.get("metadata", {}).get("status", "active") != "inactive"
+        ]
+
+        migrated = 0
+        deleted = 0
+        errors = []
+
+        for mem in memories:
+            metadata = dict(mem.get("metadata", {}))
+            memory_type = metadata.get("memory_type", "durable_fact")
+            # Rebuild clean metadata for the new entry
+            new_metadata = {
+                "memory_type": memory_type,
+                "access_count": metadata.get("access_count", 0),
+                "created_at": metadata.get("created_at", datetime.now(timezone.utc).isoformat()),
+                "status": "active",
+            }
+
+            try:
+                # Embed directly via Ollama and write to Qdrant — bypasses mem0's LLM
+                # dedup step entirely. Safe for migration since memories are already vetted.
+                self._write_memory_direct(
+                    text=mem["memory"],
+                    agent_id=new_id,
+                    metadata=new_metadata,
+                )
+                migrated += 1
+            except Exception as e:
+                errors.append({"id": mem["id"], "error": str(e)})
+                continue
+
+            try:
+                self.mem0.delete(memory_id=mem["id"])
+                deleted += 1
+            except Exception as e:
+                errors.append({"id": mem["id"], "delete_error": str(e)})
+
+        # Update registry.json if path provided
+        registry_updated = False
+        if registry_path:
+            try:
+                with open(registry_path, "r") as f:
+                    registry = _json.load(f)
+                updated = False
+                for path, aid in registry.items():
+                    if aid.lower() == old_id.lower():
+                        registry[path] = new_id
+                        updated = True
+                if updated:
+                    with open(registry_path, "w") as f:
+                        _json.dump(registry, f, indent=2)
+                    registry_updated = True
+            except Exception as e:
+                errors.append({"registry_error": str(e)})
+
+        logger.info(f"rename_agent: {old_id} → {new_id}: migrated={migrated}, deleted={deleted}")
+        return {
+            "old_id": old_id,
+            "new_id": new_id,
+            "migrated": migrated,
+            "deleted": deleted,
+            "registry_updated": registry_updated,
+            "errors": errors,
+        }
+
     def add(
         self,
         text: str,
@@ -160,10 +318,22 @@ class EnhancedMemory:
             "status": "active",
         }
 
+        agent_id = agent_id.lower()
         kwargs = {"agent_id": agent_id, "user_id": user_id or agent_id, "metadata": enhanced_metadata}
 
         result = self.mem0.add(text, **kwargs)
         logger.info(f"Stored memory for agent={agent_id}, type={memory_type}")
+
+        # Extract entities/relations and write to Neo4j using our own LLM client.
+        if self.graph_extractor:
+            memory_id = None
+            if isinstance(result, dict):
+                results_list = result.get("results", [])
+                if results_list and isinstance(results_list[0], dict):
+                    memory_id = results_list[0].get("id")
+            if memory_id:
+                self.graph_extractor.extract_and_store(text, agent_id, memory_id)
+
         return result
 
     def search(
@@ -185,8 +355,9 @@ class EnhancedMemory:
         4. Filter out inactive memories
         5. Rerank with cross-encoder (if enabled)
         6. Apply decay scoring (if enabled)
-        7. Sort by final score, return top-K
-        8. Increment access_count on returned memories
+        7. Take top-K
+        8. Enrich with graph relations (if enabled)
+        9. Increment access_count on returned memories
         """
         final_limit = limit or self.config.final_limit
 
@@ -242,11 +413,16 @@ class EnhancedMemory:
         # Step 6: Take top-K
         top_results = ranked[:final_limit]
 
-        # Step 7: Increment access counts (only for primary agent's memories)
+        # Step 7: Enrich with graph relations
+        if self.graph_extractor:
+            for mem in top_results:
+                mem["relations"] = self.graph_extractor.get_relations(mem["id"])
+
+        # Step 8: Increment access counts (only for primary agent's memories)
         primary_results = [m for m in top_results if m.get("_source_agent_id") == agent_id]
         self._increment_access_counts(primary_results)
 
-        # Step 8: Convert to ScoredMemory
+        # Step 9: Convert to ScoredMemory
         return [self._to_scored_memory(m, m.get("_source_agent_id", agent_id)) for m in top_results]
 
     def build_context(
@@ -332,6 +508,38 @@ class EnhancedMemory:
             f"extracted and stored {len(results)} memories"
         )
         return results
+
+    def _write_memory_direct(self, text: str, agent_id: str, metadata: dict):
+        """
+        Embed text via Ollama and write directly to Qdrant, bypassing mem0's LLM dedup.
+        Used for safe bulk operations like agent rename/migration.
+        """
+        import uuid
+        import httpx
+        from qdrant_client.models import PointStruct
+
+        # Embed via Ollama
+        resp = httpx.post(
+            f"{self.config.ollama_url}/api/embeddings",
+            json={"model": self.config.embedding_model, "prompt": text},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        vector = resp.json()["embedding"]
+
+        point_id = str(uuid.uuid4())
+        payload = {
+            "data": text,
+            "memory": text,
+            "agent_id": agent_id,
+            "user_id": agent_id,
+            **metadata,
+        }
+
+        self.qdrant.upsert(
+            collection_name="mem0",
+            points=[PointStruct(id=point_id, vector=vector, payload=payload)],
+        )
 
     def _increment_access_counts(self, memories: list[dict]):
         """Increment access_count metadata for retrieved memories."""

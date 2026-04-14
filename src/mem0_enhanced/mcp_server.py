@@ -2,13 +2,17 @@
 MCP Server exposing EnhancedMemory tools.
 
 Tools:
-  memory_search      - Search memories with full enhanced pipeline
-  memory_add         - Store a new memory (auto-types if type not specified)
-  memory_context     - Build a context string for prompt injection
-  memory_end_session - Extract and store memories from a completed conversation
-  memory_gc          - Run garbage collection for an agent
-  memory_get_all     - List all active memories for an agent
-  memory_token_usage - Get token usage summary
+  memory_search        - Search memories with full enhanced pipeline
+  memory_add           - Store a new memory (auto-types if type not specified)
+  memory_context       - Build a context string for prompt injection
+  memory_end_session   - Extract and store memories from a completed conversation
+  memory_gc            - Run garbage collection for an agent
+  memory_get_all       - List all active memories for an agent
+  memory_token_usage   - Get token usage summary
+  memory_list_agents   - List all agent IDs with memory counts
+  memory_rename_agent  - Rename an agent ID (migrates all memories + updates registry)
+
+All agent IDs are normalized to lowercase automatically.
 
 Run:
   python -m mem0_enhanced.mcp_server
@@ -30,13 +34,13 @@ DEFAULT_AGENT_ID = config.default_agent_id
 
 
 def resolve_agent_id(arguments: dict) -> str:
-    """Get agent_id from arguments or fall back to configured default."""
+    """Get agent_id from arguments or fall back to configured default. Always lowercase."""
     agent_id = arguments.get("agent_id") or DEFAULT_AGENT_ID
     if not agent_id:
         raise ValueError(
             "agent_id is required. Either pass it in the tool call or set MEM0_AGENT_ID env var."
         )
-    return agent_id
+    return agent_id.lower()
 
 
 @server.list_tools()
@@ -136,6 +140,28 @@ async def list_tools():
                 },
             },
         ),
+        Tool(
+            name="memory_list_agents",
+            description="List all agent IDs that have memories in the store, with memory counts.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="memory_rename_agent",
+            description="Rename an agent ID by migrating all its memories to a new ID. Updates registry.json if registry_path is provided. All agent IDs are lowercased automatically.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "old_id": {"type": "string", "description": "Current agent ID to rename"},
+                    "new_id": {"type": "string", "description": "New agent ID (will be lowercased)"},
+                    "registry_path": {"type": "string", "description": "Optional path to registry.json to update"},
+                },
+                "required": ["old_id", "new_id"],
+            },
+        ),
     ]
 
 
@@ -193,7 +219,7 @@ async def call_tool(name: str, arguments: dict):
                 type="text",
                 text=f"Extracted and stored {len(results)} memories for agent '{agent_id}'.\n"
                 + json.dumps([{
-                    "text": r.get("results", [{}])[0].get("memory", "unknown") if isinstance(r, dict) else str(r)
+                    "text": (r.get("results") or [{}])[0].get("memory", "unknown") if isinstance(r, dict) else str(r)
                 } for r in results], indent=2),
             )]
 
@@ -239,6 +265,22 @@ async def call_tool(name: str, arguments: dict):
                 since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
             summary = memory.token_logger.get_summary(agent_id=agent_id, since=since)
             return [TextContent(type="text", text=json.dumps(summary, indent=2))]
+
+        elif name == "memory_list_agents":
+            results = memory.list_agents()
+            return [TextContent(type="text", text=json.dumps(results, indent=2))]
+
+        elif name == "memory_rename_agent":
+            old_id = arguments.get("old_id", "").lower()
+            new_id = arguments.get("new_id", "").lower()
+            if not old_id or not new_id:
+                raise ValueError("old_id and new_id are required")
+            result = memory.rename_agent(
+                old_id=old_id,
+                new_id=new_id,
+                registry_path=arguments.get("registry_path"),
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]

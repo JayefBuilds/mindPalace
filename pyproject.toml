@@ -12,6 +12,7 @@ dependencies = [
     "anthropic>=0.80",
     "ollama",
     "qdrant-client",
+    "neo4j>=5.0",
 ]
 
 [project.optional-dependencies]

@@ -1,31 +1,57 @@
-# mem0_enhanced
+# mindPalace
 
-Enhanced memory orchestration layer on top of [Mem0](https://github.com/mem0ai/mem0). Wraps Mem0's API without modifying it, adding:
+Persistent memory backend for AI agents. Built on [Mem0](https://github.com/mem0ai/mem0) with a full retrieval pipeline and Neo4j graph layer.
 
-- **Query rewriting** — Expands vague queries using a local LLM
-- **Cross-encoder reranking** — Improves search precision
-- **Decay / forgetfulness** — Time-based scoring and garbage collection
-- **Automatic session extraction** — Extracts memories from completed conversations
-- **Memory typing** — Classifies memories (preference, durable_fact, decision, open_loop, correction)
-- **Garbage collection** — Marks stale, low-access memories inactive
-- **Token logging** — SQLite-based token tracking for cost visibility
+**How it works:** memories are stored as vectors (Qdrant, embedded locally via Ollama) and as a knowledge graph (Neo4j). On retrieval, both are queried and merged — vector search finds semantically similar memories, graph traversal finds *related* memories via entity relationships. A local cross-encoder reranks the combined results.
+
+**Cost:** embeddings and reranking are 100% local. The only API spend is Haiku for memory extraction/rewriting — roughly $0.01–0.05 per session.
+
+Features:
+- **Graph memory** — Neo4j entity/relationship extraction on every memory add
+- **Query rewriting** — expands vague queries before search
+- **Cross-encoder reranking** — local model rescores results by true relevance
+- **Memory typing** — classifies as `preference`, `durable_fact`, `decision`, `open_loop`, `correction`
+- **Decay scoring** — time-based relevance decay with garbage collection
+- **Session extraction** — auto-extracts memories from completed conversations
+- **Token logging** — SQLite-based cost tracking
 
 ---
 
 ## Quick Start
 
-**Prerequisites:** Docker, Python 3.10+
+**Prerequisites:** Docker, Ollama running natively on macOS
 
 ```bash
-docker compose up -d
-pip install -e .
-```
+# Pull the embedding model
+ollama pull nomic-embed-text
 
-This brings up Qdrant and Neo4j. Ollama must be running natively on macOS for Apple Silicon GPU access.
+# Start Qdrant + Neo4j + MCP server
+cp .env.example .env   # add your ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+docker compose up -d
+```
 
 **Quick test:**
 ```bash
 python -c "from mem0_enhanced import EnhancedMemory"
+```
+
+## Agent ID Convention
+
+All projects in the agentForge ecosystem use a single unified agent ID: **`agentforge`** (or a project-specific ID like `oto_build`, `yt-recon`). Set `MEM0_AGENT_ID` in your `.env` or per-session via the MCP `agent_id` parameter. Using consistent IDs means the graph can link memories across sessions.
+
+---
+
+## Retrieval Pipeline
+
+```
+query
+  → rewriter (Haiku)        # expand vague queries
+  → embedder (Ollama)       # local vector embedding
+  → Qdrant search           # semantic similarity
+  → Neo4j graph traversal   # entity relationship traversal
+  → merge + dedup
+  → reranker (local)        # cross-encoder rescoring
+  → top N results
 ```
 
 ---
@@ -37,14 +63,24 @@ The system wraps Mem0's API. Components:
 | Module | Purpose |
 |--------|---------|
 | `config.py` | Configuration via environment variables |
-| `query_rewriter.py` | Expands vague queries using local LLM |
-| `reranker.py` | Cross-encoder reranking for precision |
+| `core.py` | Main orchestrator — wires all components together |
+| `mcp_server.py` | MCP server exposing tools to AI agents |
+| `query_rewriter.py` | Expands vague queries before search |
+| `reranker.py` | Local cross-encoder reranking |
 | `decay.py` | Time-based decay + garbage collection |
 | `session_extractor.py` | Auto-extracts memories from conversations |
-| `auto_typer.py` | Classifies memories into types |
-| `token_logger.py` | SQLite-based token tracking |
-| `core.py` | Main orchestrator wiring everything together |
-| `mcp_server.py` | MCP server exposing tools to AI agents |
+| `auto_typer.py` | Classifies memories into typed categories |
+| `token_logger.py` | SQLite-based token cost tracking |
+
+**Infrastructure:**
+| Service | Role |
+|---------|------|
+| Qdrant | Vector store — semantic similarity search |
+| Neo4j | Graph store — entity/relationship traversal |
+| Ollama | Local embeddings (`nomic-embed-text`) + reranker model |
+| Anthropic Haiku | LLM for extraction, rewriting, typing |
+
+**Patches** (`patches/mem0_anthropic_llm.py`): applied at build time to fix upstream mem0ai incompatibilities with the current Anthropic API (tool format, tool_choice dict, temperature+top_p conflict, tool_use response parsing).
 
 ---
 
@@ -125,6 +161,18 @@ Key environment variables:
 | `MEM0_SEARCH_LIMIT` | `20` | Max memories before reranking |
 | `MEM0_FINAL_LIMIT` | `5` | Max memories returned |
 | `MEM0_DECAY_HALFLIFE_DAYS` | `60` | Half-life for decay |
+
+---
+
+## MCP vs CLI
+
+mindPalace is intentionally MCP-only. Here's why.
+
+**Token efficiency:** Marginal difference. The real token cost is in memory payloads — text sent and received — not the transport layer. MCP adds a small overhead for tool schemas in context, but that's negligible. The only place CLI wins is that you can discard the response (e.g. `memory_add` doesn't need to return anything into context) — with MCP, tool results always land in context. Not a meaningful enough reason to switch.
+
+**Data safety:** Zero risk. Qdrant and Neo4j are the actual stores — fully independent of transport. Switching from MCP to CLI would touch nothing in either database.
+
+**Why MCP is the right choice:** The killer feature is mid-conversation tool use. Claude can call `memory_search` inline while reasoning, then call `memory_add` immediately after a decision is made — without you lifting a finger. A CLI would require external orchestration to decide *when* to call memory, pipe the transcript somewhere, and inject results back in. You'd lose the seamless, autonomous loop that makes this actually useful.
 
 ---
 

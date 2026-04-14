@@ -44,8 +44,16 @@ class LLMClient:
 
         if provider == "anthropic":
             import anthropic
+            self._anthropic_lib = anthropic
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
             oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-            if oauth_token:
+            personal_api_key = os.environ.get("PERSONAL_ANTHROPIC_API_KEY", "")
+            self._oauth_token = oauth_token
+            self._personal_api_key = personal_api_key
+            if api_key:
+                # API key takes priority (may route through ANTHROPIC_BASE_URL if set)
+                self._anthropic = anthropic.Anthropic(api_key=api_key)
+            elif oauth_token:
                 # OAuth token (from `claude setup-token`) — requires special beta headers
                 self._anthropic = anthropic.Anthropic(
                     auth_token=oauth_token,
@@ -71,12 +79,74 @@ class LLMClient:
         else:
             return self._call_ollama(prompt, source, agent_id, temperature, max_tokens)
 
+    def _build_oauth_fallback_client(self):
+        """Build a direct Anthropic OAuth client, bypassing any gateway (ANTHROPIC_BASE_URL)."""
+        return self._anthropic_lib.Anthropic(
+            auth_token=self._oauth_token,
+            base_url="https://api.anthropic.com",
+            default_headers={
+                "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+            },
+        )
+
     def _call_anthropic(
         self, prompt: str, source: str, agent_id: str,
         temperature: float, max_tokens: int,
     ) -> LLMResponse:
+        try:
+            return self._call_anthropic_client(
+                self._anthropic, prompt, source, agent_id, temperature, max_tokens
+            )
+        except Exception as primary_err:
+            # If we have an OAuth token, retry directly against Anthropic (bypasses gateway)
+            if self._oauth_token:
+                logger.warning(
+                    f"Primary LLM call failed ({primary_err}), retrying via OAuth fallback"
+                )
+                try:
+                    fallback = self._build_oauth_fallback_client()
+                    return self._call_anthropic_client(
+                        fallback, prompt, source, agent_id, temperature, max_tokens
+                    )
+                except Exception as fallback_err:
+                    logger.error(f"OAuth fallback also failed: {fallback_err}")
+                    # Final fallback: personal API key directly against Anthropic
+                    if self._personal_api_key:
+                        logger.warning("OAuth fallback failed, retrying via personal API key")
+                        try:
+                            final = self._anthropic_lib.Anthropic(
+                                api_key=self._personal_api_key,
+                                base_url="https://api.anthropic.com",
+                            )
+                            return self._call_anthropic_client(
+                                final, prompt, source, agent_id, temperature, max_tokens
+                            )
+                        except Exception as final_err:
+                            logger.error(f"Personal API key fallback also failed: {final_err}")
+                            raise final_err
+                    raise fallback_err
+            # No OAuth token — try personal API key directly
+            if self._personal_api_key:
+                logger.warning(f"Primary LLM call failed ({primary_err}), retrying via personal API key")
+                try:
+                    final = self._anthropic_lib.Anthropic(
+                        api_key=self._personal_api_key,
+                        base_url="https://api.anthropic.com",
+                    )
+                    return self._call_anthropic_client(
+                        final, prompt, source, agent_id, temperature, max_tokens
+                    )
+                except Exception as final_err:
+                    logger.error(f"Personal API key fallback also failed: {final_err}")
+                    raise final_err
+            raise primary_err
+
+    def _call_anthropic_client(
+        self, client, prompt: str, source: str, agent_id: str,
+        temperature: float, max_tokens: int,
+    ) -> LLMResponse:
         start = time.time()
-        response = self._anthropic.messages.create(
+        response = client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
             temperature=temperature,
