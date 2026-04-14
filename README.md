@@ -17,27 +17,96 @@ Features:
 
 ---
 
+## Prerequisites
+
+**Required — install before anything else:**
+
+| Dependency | Purpose | Install |
+|------------|---------|---------|
+| [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Runs Qdrant, Neo4j, and the MCP server | `brew install --cask docker` |
+| [Ollama](https://ollama.com) | Local embeddings (runs natively on macOS for Apple Silicon GPU) | `brew install ollama` |
+| `nomic-embed-text` | Embedding model used for vector search | `ollama pull nomic-embed-text` |
+| Anthropic API key | Powers memory extraction, query rewriting, and typing (Claude Haiku) | [console.anthropic.com](https://console.anthropic.com) |
+
+**Optional:**
+- Claude Code with `claude setup-token` — lets you use your Claude.ai subscription instead of a paid API key
+
+---
+
 ## Quick Start
 
-**Prerequisites:** Docker, Ollama running natively on macOS
-
 ```bash
-# Pull the embedding model
+# 1. Make sure Ollama is running with the embedding model
+ollama serve
 ollama pull nomic-embed-text
 
-# Start Qdrant + Neo4j + MCP server
-cp .env.example .env   # add your ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+# 2. Configure your environment
+cp .env.example .env
+# Edit .env — set ANTHROPIC_API_KEY and MEM0_AGENT_ID at minimum
+
+# 3. Start the stack (Qdrant + Neo4j + MCP server)
 docker compose up -d
 ```
 
-**Quick test:**
+**Verify it's working:**
 ```bash
-python -c "from mem0_enhanced import EnhancedMemory"
+python -c "from mem0_enhanced import EnhancedMemory; print('OK')"
 ```
 
-## Agent ID Convention
+---
 
-All projects in the agentForge ecosystem use a single unified agent ID: **`agentforge`** (or a project-specific ID like `oto_build`, `yt-recon`). Set `MEM0_AGENT_ID` in your `.env` or per-session via the MCP `agent_id` parameter. Using consistent IDs means the graph can link memories across sessions.
+## Authentication
+
+Two options for the Anthropic LLM:
+
+**Option A — API key** (pay-per-token, from [console.anthropic.com](https://console.anthropic.com)):
+```bash
+export ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+**Option B — OAuth token** (uses your Claude.ai subscription, no per-token charges):
+```bash
+claude setup-token   # run on any machine logged into Claude Code
+export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+```
+
+`ANTHROPIC_API_KEY` takes priority over `CLAUDE_CODE_OAUTH_TOKEN` if both are set.
+
+---
+
+## MCP Server Setup
+
+Add to your Claude Code `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "mindpalace": {
+      "command": "docker",
+      "args": ["exec", "-i", "mindpalace-mcp-1", "python", "-m", "mem0_enhanced.mcp_server"],
+      "env": {
+        "MEM0_AGENT_ID": "my-project"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `memory_search` | Search memories with full pipeline (rewrite, rerank, decay) |
+| `memory_add` | Store a new memory (auto-types if type not specified) |
+| `memory_context` | Build a formatted context block for prompt injection |
+| `memory_end_session` | Extract and store memories from a completed conversation |
+| `memory_gc` | Run garbage collection (dry run or execute) |
+| `memory_get_all` | List all active memories for an agent |
+| `memory_token_usage` | Get token usage summary by period |
+| `memory_list_agents` | List all agent IDs in the store with memory counts |
+| `memory_rename_agent` | Rename an agent ID, migrating all its memories |
 
 ---
 
@@ -58,21 +127,22 @@ query
 
 ## Architecture
 
-The system wraps Mem0's API. Components:
-
 | Module | Purpose |
 |--------|---------|
 | `config.py` | Configuration via environment variables |
 | `core.py` | Main orchestrator — wires all components together |
 | `mcp_server.py` | MCP server exposing tools to AI agents |
+| `bridge_cli.py` | JSON bridge for programmatic/TypeScript integration |
 | `query_rewriter.py` | Expands vague queries before search |
 | `reranker.py` | Local cross-encoder reranking |
 | `decay.py` | Time-based decay + garbage collection |
 | `session_extractor.py` | Auto-extracts memories from conversations |
 | `auto_typer.py` | Classifies memories into typed categories |
+| `graph_extractor.py` | Custom Neo4j extraction (works with OAuth + API key) |
 | `token_logger.py` | SQLite-based token cost tracking |
 
 **Infrastructure:**
+
 | Service | Role |
 |---------|------|
 | Qdrant | Vector store — semantic similarity search |
@@ -80,72 +150,17 @@ The system wraps Mem0's API. Components:
 | Ollama | Local embeddings (`nomic-embed-text`) + reranker model |
 | Anthropic Haiku | LLM for extraction, rewriting, typing |
 
-**Patches** (`patches/mem0_anthropic_llm.py`): applied at build time to fix upstream mem0ai incompatibilities with the current Anthropic API (tool format, tool_choice dict, temperature+top_p conflict, tool_use response parsing).
-
----
-
-## MCP Server Setup
-
-Add to your Claude Code `.mcp.json` (or equivalent):
-
-```json
-{
-  "mcpServers": {
-    "memory": {
-      "command": "python",
-      "args": ["-m", "mem0_enhanced.mcp_server"],
-      "env": {
-        "MEM0_AGENT_ID": "my-project-name"
-      }
-    }
-  }
-}
-```
-
----
-
-## Available MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `memory_search` | Search memories with full pipeline (rewrite, rerank, decay) |
-| `memory_add` | Store a new memory (auto-types if type not specified) |
-| `memory_context` | Build a formatted context block for prompt injection |
-| `memory_end_session` | Extract and store memories from a completed conversation |
-| `memory_gc` | Run garbage collection (dry run or execute) |
-| `memory_get_all` | List all active memories for an agent |
-| `memory_token_usage` | Get token usage summary by period |
-
----
-
-## Authentication
-
-The LLM provider is Anthropic (Claude Haiku 4.5). Two auth options:
-
-**Option A — API key** (pay-per-token, from [console.anthropic.com](https://console.anthropic.com)):
-```bash
-export ANTHROPIC_API_KEY=sk-ant-api03-...
-```
-
-**Option B — OAuth token** (uses your Claude.ai subscription, free of per-token charges):
-```bash
-claude setup-token   # run on any machine logged into Claude Code
-export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-```
-
-`CLAUDE_CODE_OAUTH_TOKEN` takes priority over `ANTHROPIC_API_KEY` if both are set.
+**Patches** (`patches/mem0_anthropic_llm.py`): applied at Docker build time to fix upstream mem0ai incompatibilities with the current Anthropic API (tool format, tool_choice dict, temperature+top_p conflict, tool_use response parsing).
 
 ---
 
 ## Configuration
 
-Key environment variables:
-
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEM0_AGENT_ID` | — | Default agent/project ID (required for MCP) |
-| `CLAUDE_CODE_OAUTH_TOKEN` | — | Claude.ai subscription OAuth token (preferred) |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key (fallback if no OAuth token) |
+| `MEM0_AGENT_ID` | — | Default agent/project ID (required) |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key (priority auth) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | — | Claude.ai subscription OAuth token (fallback) |
 | `MEM0_LLM_PROVIDER` | `anthropic` | LLM provider: `anthropic` or `ollama` |
 | `MEM0_LLM_MODEL` | `claude-haiku-4-5-20251001` | LLM model for all tasks |
 | `MEM0_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
@@ -153,14 +168,14 @@ Key environment variables:
 | `MEM0_NEO4J_URL` | `bolt://localhost:7687` | Neo4j bolt URL |
 | `MEM0_NEO4J_PASSWORD` | `mem0graph` | Neo4j password |
 | `MEM0_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model |
-| `MEM0_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model |
-| `MEM0_ENABLE_GRAPH` | `true` | Enable Neo4j graph memory |
+| `MEM0_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder reranker model |
+| `MEM0_ENABLE_GRAPH` | `false` | Enable Neo4j graph memory |
 | `MEM0_ENABLE_RERANKER` | `true` | Enable reranking |
 | `MEM0_ENABLE_REWRITER` | `true` | Enable query rewriting |
 | `MEM0_ENABLE_DECAY` | `true` | Enable decay scoring |
-| `MEM0_SEARCH_LIMIT` | `20` | Max memories before reranking |
+| `MEM0_SEARCH_LIMIT` | `20` | Max memories fetched before reranking |
 | `MEM0_FINAL_LIMIT` | `5` | Max memories returned |
-| `MEM0_DECAY_HALFLIFE_DAYS` | `60` | Half-life for decay |
+| `MEM0_DECAY_HALFLIFE_DAYS` | `60` | Half-life for decay scoring |
 
 ---
 
@@ -168,17 +183,16 @@ Key environment variables:
 
 mindPalace is intentionally MCP-only. Here's why.
 
-**Token efficiency:** Marginal difference. The real token cost is in memory payloads — text sent and received — not the transport layer. MCP adds a small overhead for tool schemas in context, but that's negligible. The only place CLI wins is that you can discard the response (e.g. `memory_add` doesn't need to return anything into context) — with MCP, tool results always land in context. Not a meaningful enough reason to switch.
+**Token efficiency:** Marginal difference. The real token cost is in memory payloads — text sent and received — not the transport layer. MCP adds a small overhead for tool schemas in context, but that's negligible.
 
-**Data safety:** Zero risk. Qdrant and Neo4j are the actual stores — fully independent of transport. Switching from MCP to CLI would touch nothing in either database.
-
-**Why MCP is the right choice:** The killer feature is mid-conversation tool use. Claude can call `memory_search` inline while reasoning, then call `memory_add` immediately after a decision is made — without you lifting a finger. A CLI would require external orchestration to decide *when* to call memory, pipe the transcript somewhere, and inject results back in. You'd lose the seamless, autonomous loop that makes this actually useful.
+**Why MCP is the right choice:** The killer feature is mid-conversation tool use. Claude can call `memory_search` inline while reasoning, then call `memory_add` immediately after a decision is made — without external orchestration. A CLI would require you to decide *when* to call memory, pipe the transcript somewhere, and inject results back in. You'd lose the seamless, autonomous loop.
 
 ---
 
 ## Running Tests
 
 ```bash
+pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
@@ -198,69 +212,51 @@ python scripts/token_report.py --since 2026-02-01 --json-output
 
 ```bash
 python scripts/gc.py <agent_id>              # Dry run
-python scripts/gc.py <agent_id> --execute    # Actually mark inactive
+python scripts/gc.py <agent_id> --execute    # Mark stale memories inactive
 ```
 
-Intended for cron (see `cron/mem0-gc.cron` for examples).
+Intended for cron — see `cron/mem0-gc.cron` for examples.
 
 ---
 
-## Mac Mini Deployment
+## Mac Mini / Remote Deployment
 
-The entire stack runs in Docker, making it easy to move to a Mac Mini or any other machine.
+The entire stack runs in Docker, making it easy to move to a dedicated machine.
 
-### 1. Install prerequisites on the Mac Mini
+### 1. Install prerequisites
 
 ```bash
-# Docker Desktop
 brew install --cask docker
-
-# Ollama (runs natively for Apple Silicon GPU access)
 brew install ollama
 ollama pull nomic-embed-text
 ollama serve
 ```
 
-### 2. Copy the project
+### 2. Clone and configure
 
 ```bash
-# On your Mac Mini — clone the repo or copy just these two files:
-git clone <your-repo-url>
-cd memory
-```
-
-### 3. Create your .env file
-
-```bash
+git clone https://github.com/JayefBuild/mindPalace.git
+cd mindPalace
 cp .env.example .env
-# Edit .env and set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY
+# Edit .env — set ANTHROPIC_API_KEY and MEM0_AGENT_ID
 ```
 
-Generate a fresh OAuth token on any machine with Claude Code:
-
-```bash
-claude setup-token
-# Copy the sk-ant-oat01-... value into .env
-```
-
-### 4. Start the stack
+### 3. Start the stack
 
 ```bash
 docker compose up -d
 ```
 
-That's it. Qdrant, Neo4j, and the MCP server all start automatically.
+### 4. Point Claude Code at the remote machine
 
-### 5. Point Claude Code at the Mac Mini
-
-In your `.mcp.json` on your laptop, change the MCP server to connect over the network instead of running locally. Expose the Mac Mini via **Tailscale** for secure remote access:
+Use [Tailscale](https://tailscale.com) for secure access, then in your laptop's `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "memory": {
+    "mindpalace": {
       "command": "ssh",
-      "args": ["mac-mini", "docker exec -i memory-mcp-1 python -m mem0_enhanced.mcp_server"],
+      "args": ["mac-mini", "docker exec -i mindpalace-mcp-1 python -m mem0_enhanced.mcp_server"],
       "env": {
         "MEM0_AGENT_ID": "my-project"
       }
@@ -269,8 +265,6 @@ In your `.mcp.json` on your laptop, change the MCP server to connect over the ne
 }
 ```
 
-Or bind the MCP container to a port and connect directly if you prefer TCP.
-
 ### Multi-device access
 
-To expose Qdrant/Neo4j to other devices (e.g. for direct access via Tailscale), change the port bindings in `docker-compose.yml` from `127.0.0.1:PORT:PORT` to `0.0.0.0:PORT:PORT`. Only do this on a trusted network or behind Tailscale.
+To expose Qdrant/Neo4j to other devices on the network, change port bindings in `docker-compose.yml` from `127.0.0.1:PORT:PORT` to `0.0.0.0:PORT:PORT`. Only do this on a trusted network or behind Tailscale.
