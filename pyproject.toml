@@ -5,7 +5,7 @@ description = "Enhanced memory layer with query rewriting, reranking, and decay 
 requires-python = ">=3.10"
 
 dependencies = [
-    "mem0ai>=1.0",
+    "mem0ai==2.0.0",
     "sentence-transformers>=3.0",
     "httpx>=0.27",
     "mcp>=1.0",

@@ -115,7 +115,6 @@ async def list_tools():
                     "agent_id": {"type": "string", "description": "Project/agent ID"},
                     "dry_run": {"type": "boolean", "description": "Preview only, don't actually mark inactive", "default": True},
                 },
-                "required": [],
             },
         ),
         Tool(
@@ -126,7 +125,6 @@ async def list_tools():
                 "properties": {
                     "agent_id": {"type": "string", "description": "Project/agent ID"},
                 },
-                "required": [],
             },
         ),
         Tool(
@@ -146,7 +144,6 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {},
-                "required": [],
             },
         ),
         Tool(
@@ -237,7 +234,7 @@ async def call_tool(name: str, arguments: dict):
 
         elif name == "memory_get_all":
             agent_id = resolve_agent_id(arguments)
-            results = memory.mem0.get_all(agent_id=agent_id, user_id=agent_id)
+            results = memory.mem0.get_all(filters={"agent_id": agent_id, "user_id": agent_id})
             active = [
                 m for m in results.get("results", [])
                 if m.get("metadata", {}).get("status", "active") != "inactive"

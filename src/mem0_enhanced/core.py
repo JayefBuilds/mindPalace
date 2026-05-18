@@ -226,7 +226,7 @@ class EnhancedMemory:
             return {"migrated": 0, "deleted": 0, "message": "old_id and new_id are the same"}
 
         # Fetch all memories using original case (Qdrant stores agent_id as-is)
-        raw = self.mem0.get_all(agent_id=old_id, user_id=old_id)
+        raw = self.mem0.get_all(filters={"agent_id": old_id, "user_id": old_id})
         memories = [
             m for m in raw.get("results", [])
             if m.get("metadata", {}).get("status", "active") != "inactive"
@@ -375,9 +375,11 @@ class EnhancedMemory:
 
         for q in queries:
             for aid in all_agent_ids:
-                kwargs = {"agent_id": aid, "user_id": effective_user_id, "limit": self.config.search_limit}
-
-                results = self.mem0.search(query=q, **kwargs)
+                results = self.mem0.search(
+                    query=q,
+                    filters={"agent_id": aid, "user_id": effective_user_id},
+                    top_k=self.config.search_limit,
+                )
                 for mem in results.get("results", []):
                     mem["_source_agent_id"] = aid
                     mid = mem["id"]
@@ -477,7 +479,7 @@ class EnhancedMemory:
 
         This is the automatic memory pipeline. Call this when a session ends.
         """
-        existing = self.mem0.get_all(agent_id=agent_id, user_id=user_id or agent_id)
+        existing = self.mem0.get_all(filters={"agent_id": agent_id, "user_id": user_id or agent_id})
         existing_texts = [
             m["memory"] for m in existing.get("results", [])
             if m.get("metadata", {}).get("status", "active") != "inactive"

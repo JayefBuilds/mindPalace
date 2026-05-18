@@ -113,9 +113,9 @@ class GarbageCollector:
 
         if all_memories is None:
             if self._mem0 is not None:
-                all_memories = self._mem0.get_all(agent_id=agent_id, user_id=agent_id)
+                all_memories = self._mem0.get_all(filters={"agent_id": agent_id, "user_id": agent_id})
             elif hasattr(self._qdrant, 'get_all'):
-                all_memories = self._qdrant.get_all(agent_id=agent_id, user_id=agent_id)
+                all_memories = self._qdrant.get_all(filters={"agent_id": agent_id, "user_id": agent_id})
             else:
                 logger.warning("GC: No way to fetch memories")
                 return []
