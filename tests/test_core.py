@@ -55,6 +55,7 @@ class TestAdd:
         metadata = call_kwargs[1]["metadata"]
         assert metadata["memory_type"] == "preference"
         assert metadata["status"] == "active"
+        assert metadata["lifecycle"] == "active"
         assert metadata["access_count"] == 0
 
     def test_add_without_type_auto_classifies(self, enhanced_memory, mock_mem0):
@@ -65,6 +66,33 @@ class TestAdd:
         call_kwargs = mock_mem0.add.call_args
         metadata = call_kwargs[1]["metadata"]
         assert metadata["memory_type"] == "durable_fact"
+
+    def test_add_with_supersedes_archives_old_memories(self, enhanced_memory, mock_mem0):
+        """add() with supersedes should archive replaced memories."""
+        mock_mem0.add.return_value = {"results": [{"id": "new-id", "memory": "new"}]}
+
+        with patch.object(enhanced_memory.qdrant, "set_payload") as mock_set_payload:
+            enhanced_memory.add(
+                "Updated fact",
+                agent_id="test",
+                memory_type="correction",
+                supersedes=["old-id"],
+            )
+
+        metadata = mock_mem0.add.call_args[1]["metadata"]
+        assert metadata["supersedes"] == ["old-id"]
+        payload = mock_set_payload.call_args[1]["payload"]
+        assert payload["archived_at"]
+        mock_set_payload.assert_called_with(
+            collection_name="mem0",
+            payload={
+                "lifecycle": "archived",
+                "status": "inactive",
+                "archived_at": payload["archived_at"],
+                "superseded_by": "new-id",
+            },
+            points=["old-id"],
+        )
 
 
 class TestSearch:
@@ -106,6 +134,30 @@ class TestSearch:
                     "memory": "Inactive",
                     "score": 0.8,
                     "metadata": {"status": "inactive", "created_at": datetime.now(timezone.utc).isoformat()},
+                },
+            ]
+        }
+
+        results = enhanced_memory.search("test", agent_id="test")
+
+        assert len(results) == 1
+        assert results[0].text == "Active"
+
+    def test_search_filters_archived_lifecycle(self, enhanced_memory, mock_mem0):
+        """search() should filter out memories with lifecycle=archived."""
+        mock_mem0.search.return_value = {
+            "results": [
+                {
+                    "id": "1",
+                    "memory": "Active",
+                    "score": 0.9,
+                    "metadata": {"lifecycle": "active", "created_at": datetime.now(timezone.utc).isoformat()},
+                },
+                {
+                    "id": "2",
+                    "memory": "Archived",
+                    "score": 0.8,
+                    "metadata": {"lifecycle": "archived", "created_at": datetime.now(timezone.utc).isoformat()},
                 },
             ]
         }

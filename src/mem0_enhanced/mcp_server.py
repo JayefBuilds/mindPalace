@@ -11,6 +11,11 @@ Tools:
   memory_token_usage   - Get token usage summary
   memory_list_agents   - List all agent IDs with memory counts
   memory_rename_agent  - Rename an agent ID (migrates all memories + updates registry)
+  memory_health        - Inspect backend and memory metadata health
+  memory_reembed       - Recompute embeddings for active memories
+  memory_events        - List recent memory events
+  memory_event_summary - Summarize memory events
+  memory_consolidate   - Propose/review/apply memory consolidation
 
 All agent IDs are normalized to lowercase automatically.
 
@@ -26,6 +31,7 @@ import asyncio
 
 from .core import EnhancedMemory
 from .config import EnhancedMemoryConfig
+from .lifecycle import is_active, lifecycle_of
 
 config = EnhancedMemoryConfig.from_env()
 memory = EnhancedMemory(config)
@@ -76,6 +82,11 @@ async def list_tools():
                         "default": "durable_fact",
                     },
                     "metadata": {"type": "object", "description": "Optional additional metadata"},
+                    "supersedes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Memory IDs this new memory replaces; superseded memories are archived.",
+                    },
                 },
                 "required": ["text"],
             },
@@ -159,6 +170,65 @@ async def list_tools():
                 "required": ["old_id", "new_id"],
             },
         ),
+        Tool(
+            name="memory_health",
+            description="Inspect Qdrant/Ollama/graph health and summarize memory metadata. Scans Qdrant payloads directly.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "Optional agent ID filter"},
+                    "scan_limit": {"type": "integer", "description": "Max Qdrant records to scan", "default": 5000},
+                },
+            },
+        ),
+        Tool(
+            name="memory_reembed",
+            description="Recompute embeddings for active memories using the configured Ollama embedding model. Defaults to dry_run=true.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "Optional agent ID filter"},
+                    "dry_run": {"type": "boolean", "description": "Preview only; do not update vectors", "default": True},
+                    "limit": {"type": "integer", "description": "Optional max active memories to process"},
+                },
+            },
+        ),
+        Tool(
+            name="memory_events",
+            description="List recent memory events from the local SQLite audit log.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "Optional agent ID filter"},
+                    "event_type": {"type": "string", "description": "Optional event type filter"},
+                    "memory_id": {"type": "string", "description": "Optional memory ID filter"},
+                    "limit": {"type": "integer", "description": "Max events to return", "default": 100},
+                },
+            },
+        ),
+        Tool(
+            name="memory_event_summary",
+            description="Summarize memory event counts by type/status/agent.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "Optional agent ID filter"},
+                    "period": {"type": "string", "enum": ["today", "week", "month", "all"], "default": "week"},
+                },
+            },
+        ),
+        Tool(
+            name="memory_consolidate",
+            description="Run proposer/adversary/judge consolidation for one agent. Defaults to dry_run=true; set dry_run=false to apply approved merge/supersede/prune actions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "Project/agent ID"},
+                    "dry_run": {"type": "boolean", "description": "Preview only; do not apply changes", "default": True},
+                    "max_memories": {"type": "integer", "description": "Max active memories to review", "default": 150},
+                },
+            },
+        ),
     ]
 
 
@@ -193,6 +263,7 @@ async def call_tool(name: str, arguments: dict):
                 agent_id=agent_id,
                 memory_type=arguments.get("memory_type"),
                 metadata=arguments.get("metadata"),
+                supersedes=arguments.get("supersedes"),
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -237,7 +308,7 @@ async def call_tool(name: str, arguments: dict):
             results = memory.mem0.get_all(filters={"agent_id": agent_id, "user_id": agent_id})
             active = [
                 m for m in results.get("results", [])
-                if m.get("metadata", {}).get("status", "active") != "inactive"
+                if is_active(m)
             ]
             return [TextContent(
                 type="text",
@@ -245,7 +316,9 @@ async def call_tool(name: str, arguments: dict):
                     "id": m["id"],
                     "memory": m["memory"],
                     "type": m.get("metadata", {}).get("memory_type", "unknown"),
+                    "lifecycle": lifecycle_of(m),
                     "access_count": m.get("metadata", {}).get("access_count", 0),
+                    "supersedes": m.get("metadata", {}).get("supersedes", []),
                 } for m in active], indent=2),
             )]
 
@@ -276,6 +349,53 @@ async def call_tool(name: str, arguments: dict):
                 old_id=old_id,
                 new_id=new_id,
                 registry_path=arguments.get("registry_path"),
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "memory_health":
+            result = memory.health_status(
+                agent_id=arguments.get("agent_id"),
+                scan_limit=arguments.get("scan_limit", 5000),
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "memory_reembed":
+            result = memory.reembed_memories(
+                agent_id=arguments.get("agent_id"),
+                dry_run=arguments.get("dry_run", True),
+                limit=arguments.get("limit"),
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "memory_events":
+            result = memory.event_logger.get_events(
+                agent_id=arguments.get("agent_id"),
+                event_type=arguments.get("event_type"),
+                memory_id=arguments.get("memory_id"),
+                limit=arguments.get("limit", 100),
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "memory_event_summary":
+            from datetime import datetime, timezone, timedelta
+            agent_id = arguments.get("agent_id")
+            period = arguments.get("period", "week")
+            since = None
+            if period == "today":
+                since = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00")
+            elif period == "week":
+                since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            elif period == "month":
+                since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+            result = memory.event_logger.get_summary(agent_id=agent_id, since=since)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "memory_consolidate":
+            agent_id = resolve_agent_id(arguments)
+            result = memory.run_consolidation(
+                agent_id=agent_id,
+                dry_run=arguments.get("dry_run", True),
+                max_memories=arguments.get("max_memories", 150),
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 

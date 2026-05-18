@@ -11,6 +11,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from .lifecycle import PRUNED, inactive_payload, is_active
+
 logger = logging.getLogger(__name__)
 
 TYPE_PERSISTENCE = {
@@ -125,7 +127,7 @@ class GarbageCollector:
         for mem in all_memories.get("results", []):
             metadata = mem.get("metadata", {})
 
-            if metadata.get("status") == "inactive":
+            if not is_active(mem):
                 continue
 
             memory_type = metadata.get("memory_type", "unknown")
@@ -152,7 +154,7 @@ class GarbageCollector:
                         self._qdrant.set_payload(
                             collection_name="mem0",
                             payload={
-                                "status": "inactive",
+                                **inactive_payload(PRUNED),
                                 "gc_timestamp": now.isoformat(),
                             },
                             points=[mem["id"]],
@@ -164,7 +166,7 @@ class GarbageCollector:
                                 mem["id"],
                                 metadata={
                                     **metadata,
-                                    "status": "inactive",
+                                    **inactive_payload(PRUNED),
                                     "gc_timestamp": now.isoformat(),
                                 },
                             )

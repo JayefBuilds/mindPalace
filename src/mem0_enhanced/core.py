@@ -18,8 +18,10 @@ import os
 from typing import Optional
 from datetime import datetime, timezone
 
+import httpx
 from mem0 import Memory
 from qdrant_client import QdrantClient
+from qdrant_client.models import PointVectors
 
 from .config import EnhancedMemoryConfig
 from .llm import LLMClient
@@ -29,8 +31,10 @@ from .decay import DecayScorer, GarbageCollector
 from .session_extractor import SessionExtractor
 from .auto_typer import AutoTyper
 from .token_logger import TokenLogger
+from .memory_event_logger import MemoryEventLogger
 from .graph_extractor import GraphExtractor
 from .types import ScoredMemory
+from .lifecycle import ARCHIVED, active_payload, inactive_payload, is_active, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,7 @@ class EnhancedMemory:
 
         # Initialize token logger
         self.token_logger = TokenLogger()
+        self.event_logger = MemoryEventLogger()
 
         # Initialize unified LLM client (Anthropic Haiku or Ollama)
         self.llm = LLMClient(
@@ -229,7 +234,7 @@ class EnhancedMemory:
         raw = self.mem0.get_all(filters={"agent_id": old_id, "user_id": old_id})
         memories = [
             m for m in raw.get("results", [])
-            if m.get("metadata", {}).get("status", "active") != "inactive"
+            if is_active(m)
         ]
 
         migrated = 0
@@ -243,9 +248,11 @@ class EnhancedMemory:
             new_metadata = {
                 "memory_type": memory_type,
                 "access_count": metadata.get("access_count", 0),
-                "created_at": metadata.get("created_at", datetime.now(timezone.utc).isoformat()),
-                "status": "active",
+                "created_at": metadata.get("created_at", utc_now_iso()),
+                **active_payload(),
             }
+            if metadata.get("supersedes"):
+                new_metadata["supersedes"] = metadata["supersedes"]
 
             try:
                 # Embed directly via Ollama and write to Qdrant — bypasses mem0's LLM
@@ -301,6 +308,7 @@ class EnhancedMemory:
         user_id: Optional[str] = None,
         memory_type: Optional[str] = None,
         metadata: Optional[dict] = None,
+        supersedes: Optional[list[str]] = None,
     ) -> dict:
         """
         Store a memory with enhanced metadata.
@@ -314,9 +322,11 @@ class EnhancedMemory:
             **(metadata or {}),
             "memory_type": memory_type,
             "access_count": 0,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "status": "active",
+            "created_at": utc_now_iso(),
+            **active_payload(),
         }
+        if supersedes:
+            enhanced_metadata["supersedes"] = supersedes
 
         agent_id = agent_id.lower()
         kwargs = {"agent_id": agent_id, "user_id": user_id or agent_id, "metadata": enhanced_metadata}
@@ -324,15 +334,31 @@ class EnhancedMemory:
         result = self.mem0.add(text, **kwargs)
         logger.info(f"Stored memory for agent={agent_id}, type={memory_type}")
 
+        memory_id = self._extract_result_memory_id(result)
+        if memory_id and supersedes:
+            self._archive_superseded(supersedes, memory_id)
+
         # Extract entities/relations and write to Neo4j using our own LLM client.
         if self.graph_extractor:
-            memory_id = None
-            if isinstance(result, dict):
-                results_list = result.get("results", [])
-                if results_list and isinstance(results_list[0], dict):
-                    memory_id = results_list[0].get("id")
             if memory_id:
                 self.graph_extractor.extract_and_store(text, agent_id, memory_id)
+                self.event_logger.log_event(
+                    event_type="graph_extracted",
+                    agent_id=agent_id,
+                    memory_id=memory_id,
+                    source="core.add",
+                )
+
+        self.event_logger.log_event(
+            event_type="memory_added",
+            agent_id=agent_id,
+            memory_id=memory_id,
+            source="core.add",
+            metadata={
+                "memory_type": memory_type,
+                "supersedes": supersedes or [],
+            },
+        )
 
         return result
 
@@ -389,7 +415,7 @@ class EnhancedMemory:
         # Step 3: Filter inactive
         active = [
             m for m in all_results.values()
-            if m.get("metadata", {}).get("status", "active") != "inactive"
+            if is_active(m)
         ]
 
         if not active:
@@ -425,7 +451,18 @@ class EnhancedMemory:
         self._increment_access_counts(primary_results)
 
         # Step 9: Convert to ScoredMemory
-        return [self._to_scored_memory(m, m.get("_source_agent_id", agent_id)) for m in top_results]
+        scored = [self._to_scored_memory(m, m.get("_source_agent_id", agent_id)) for m in top_results]
+        self.event_logger.log_event(
+            event_type="memory_searched",
+            agent_id=agent_id,
+            source="core.search",
+            metadata={
+                "query": query,
+                "result_count": len(scored),
+                "also_search": also_search or [],
+            },
+        )
+        return scored
 
     def build_context(
         self,
@@ -462,11 +499,193 @@ class EnhancedMemory:
             return ""
 
         header = "## Relevant Memories\n"
-        return header + "\n".join(lines)
+        context = header + "\n".join(lines)
+        self.event_logger.log_event(
+            event_type="memory_context_built",
+            agent_id=agent_id,
+            source="core.build_context",
+            metadata={
+                "query": query,
+                "memory_count": len(lines),
+                "token_budget": token_budget,
+            },
+        )
+        return context
 
     def run_gc(self, agent_id: str, dry_run: bool = False) -> list[dict]:
         """Run garbage collection for a specific agent/project."""
-        return self.gc.collect(agent_id=agent_id, dry_run=dry_run)
+        results = self.gc.collect(agent_id=agent_id, dry_run=dry_run)
+        self.event_logger.log_event(
+            event_type="memory_gc",
+            agent_id=agent_id,
+            source="core.run_gc",
+            metadata={"dry_run": dry_run, "candidate_count": len(results)},
+        )
+        return results
+
+    def health_status(self, agent_id: Optional[str] = None, scan_limit: int = 5000) -> dict:
+        """
+        Return operational health for backing services and memory metadata.
+
+        This intentionally scans Qdrant payloads directly so it can diagnose
+        records even when Mem0's higher-level API shape changes.
+        """
+        status = {
+            "qdrant": {"ok": False, "error": None},
+            "ollama": {"ok": False, "error": None, "embedding_model": self.config.embedding_model},
+            "graph": {
+                "enabled": self.graph_extractor is not None,
+                "connected": bool(getattr(self.graph_extractor, "_driver", None)) if self.graph_extractor else False,
+            },
+            "memories": {
+                "scanned": 0,
+                "active": 0,
+                "archived": 0,
+                "pruned": 0,
+                "legacy_inactive": 0,
+                "missing_text": 0,
+                "missing_vector": 0,
+                "by_agent": {},
+                "by_type": {},
+                "truncated": False,
+            },
+        }
+
+        try:
+            for mem in self._scroll_qdrant_memories(
+                agent_id=agent_id,
+                scan_limit=scan_limit,
+                with_vectors=True,
+            ):
+                payload = mem.get("metadata", {})
+                lifecycle = payload.get("lifecycle")
+                if lifecycle == "archived":
+                    status["memories"]["archived"] += 1
+                elif lifecycle == "pruned" or payload.get("status") == "inactive":
+                    status["memories"]["pruned"] += 1
+                    if lifecycle is None:
+                        status["memories"]["legacy_inactive"] += 1
+                else:
+                    status["memories"]["active"] += 1
+
+                if not mem.get("memory"):
+                    status["memories"]["missing_text"] += 1
+                if not mem.get("_has_vector"):
+                    status["memories"]["missing_vector"] += 1
+
+                aid = payload.get("agent_id") or payload.get("user_id") or "unknown"
+                mtype = payload.get("memory_type", "unknown")
+                by_agent = status["memories"]["by_agent"]
+                by_type = status["memories"]["by_type"]
+                by_agent[aid] = by_agent.get(aid, 0) + 1
+                by_type[mtype] = by_type.get(mtype, 0) + 1
+                status["memories"]["scanned"] += 1
+
+            status["memories"]["truncated"] = status["memories"]["scanned"] >= scan_limit
+            status["qdrant"]["ok"] = True
+        except Exception as e:
+            status["qdrant"]["error"] = str(e)
+
+        try:
+            resp = httpx.get(f"{self.config.ollama_url}/api/tags", timeout=3)
+            resp.raise_for_status()
+            models = [m.get("name") for m in resp.json().get("models", [])]
+            status["ollama"]["ok"] = True
+            status["ollama"]["models"] = models
+            status["ollama"]["embedding_model_present"] = any(
+                name == self.config.embedding_model or name.startswith(f"{self.config.embedding_model}:")
+                for name in models
+                if isinstance(name, str)
+            )
+        except Exception as e:
+            status["ollama"]["error"] = str(e)
+
+        self.event_logger.log_event(
+            event_type="memory_health_checked",
+            agent_id=agent_id or "all",
+            source="core.health_status",
+            metadata={
+                "qdrant_ok": status["qdrant"]["ok"],
+                "ollama_ok": status["ollama"]["ok"],
+                "scanned": status["memories"]["scanned"],
+            },
+        )
+        return status
+
+    def reembed_memories(
+        self,
+        agent_id: Optional[str] = None,
+        dry_run: bool = True,
+        limit: Optional[int] = None,
+    ) -> dict:
+        """
+        Recompute embeddings for active memories and update Qdrant vectors.
+
+        Defaults to dry-run so operators can estimate blast radius first.
+        """
+        result = {
+            "dry_run": dry_run,
+            "agent_id": agent_id,
+            "scanned": 0,
+            "updated": 0,
+            "failed": 0,
+            "errors": [],
+        }
+
+        for mem in self._scroll_qdrant_memories(
+            agent_id=agent_id,
+            active_only=True,
+            scan_limit=limit,
+            with_vectors=False,
+        ):
+            result["scanned"] += 1
+            text = mem.get("memory") or ""
+            if not text:
+                result["failed"] += 1
+                result["errors"].append({"id": mem["id"], "error": "missing memory text"})
+                continue
+            if dry_run:
+                continue
+
+            try:
+                vector = self._embed_text(text)
+                self.qdrant.update_vectors(
+                    collection_name="mem0",
+                    points=[PointVectors(id=mem["id"], vector=vector)],
+                )
+                result["updated"] += 1
+            except Exception as e:
+                result["failed"] += 1
+                result["errors"].append({"id": mem["id"], "error": str(e)})
+
+        self.event_logger.log_event(
+            event_type="memory_reembedded",
+            agent_id=agent_id or "all",
+            source="core.reembed_memories",
+            metadata={
+                "dry_run": dry_run,
+                "scanned": result["scanned"],
+                "updated": result["updated"],
+                "failed": result["failed"],
+            },
+        )
+        return result
+
+    def run_consolidation(
+        self,
+        agent_id: str,
+        dry_run: bool = True,
+        max_memories: int = 150,
+    ) -> dict:
+        """Run proposer/adversary/judge consolidation for one agent."""
+        from .consolidation import MemoryConsolidator
+
+        result = MemoryConsolidator(self).run(
+            agent_id=agent_id,
+            dry_run=dry_run,
+            max_memories=max_memories,
+        )
+        return result.to_dict()
 
     def end_session(
         self,
@@ -482,7 +701,7 @@ class EnhancedMemory:
         existing = self.mem0.get_all(filters={"agent_id": agent_id, "user_id": user_id or agent_id})
         existing_texts = [
             m["memory"] for m in existing.get("results", [])
-            if m.get("metadata", {}).get("status", "active") != "inactive"
+            if is_active(m)
         ]
 
         shards = self.extractor.extract(
@@ -509,6 +728,12 @@ class EnhancedMemory:
             f"End of session for agent={agent_id}: "
             f"extracted and stored {len(results)} memories"
         )
+        self.event_logger.log_event(
+            event_type="session_extracted",
+            agent_id=agent_id,
+            source="core.end_session",
+            metadata={"stored_count": len(results)},
+        )
         return results
 
     def _write_memory_direct(self, text: str, agent_id: str, metadata: dict):
@@ -517,17 +742,10 @@ class EnhancedMemory:
         Used for safe bulk operations like agent rename/migration.
         """
         import uuid
-        import httpx
         from qdrant_client.models import PointStruct
 
         # Embed via Ollama
-        resp = httpx.post(
-            f"{self.config.ollama_url}/api/embeddings",
-            json={"model": self.config.embedding_model, "prompt": text},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        vector = resp.json()["embedding"]
+        vector = self._embed_text(text)
 
         point_id = str(uuid.uuid4())
         payload = {
@@ -543,6 +761,99 @@ class EnhancedMemory:
             points=[PointStruct(id=point_id, vector=vector, payload=payload)],
         )
 
+    def _embed_text(self, text: str) -> list[float]:
+        """Embed text using the configured local Ollama embedding model."""
+        resp = httpx.post(
+            f"{self.config.ollama_url}/api/embeddings",
+            json={"model": self.config.embedding_model, "prompt": text},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["embedding"]
+
+    def _scroll_qdrant_memories(
+        self,
+        agent_id: Optional[str] = None,
+        active_only: bool = False,
+        scan_limit: Optional[int] = None,
+        with_vectors: bool = False,
+    ):
+        """Yield normalized memory dicts from the Qdrant mem0 collection."""
+        offset = None
+        yielded = 0
+        page_size = 500
+
+        while True:
+            if scan_limit is not None:
+                remaining = scan_limit - yielded
+                if remaining <= 0:
+                    break
+                page_size = min(500, remaining)
+
+            points, next_offset = self.qdrant.scroll(
+                collection_name="mem0",
+                limit=page_size,
+                offset=offset,
+                with_payload=True,
+                with_vectors=with_vectors,
+            )
+
+            for point in points:
+                payload = point.payload or {}
+                aid = payload.get("agent_id") or payload.get("user_id")
+                if agent_id and aid != agent_id:
+                    continue
+                memory = {
+                    "id": str(point.id),
+                    "memory": payload.get("memory") or payload.get("data") or "",
+                    "metadata": payload,
+                    "_has_vector": bool(getattr(point, "vector", None)),
+                }
+                if active_only and not is_active(memory):
+                    continue
+                yield memory
+                yielded += 1
+                if scan_limit is not None and yielded >= scan_limit:
+                    return
+
+            if next_offset is None:
+                break
+            offset = next_offset
+
+    @staticmethod
+    def _extract_result_memory_id(result: dict) -> Optional[str]:
+        """Best-effort extraction of the memory id from a Mem0 add result."""
+        if not isinstance(result, dict):
+            return None
+        results_list = result.get("results", [])
+        if results_list and isinstance(results_list[0], dict):
+            return results_list[0].get("id")
+        return None
+
+    def _archive_superseded(self, memory_ids: list[str], superseded_by: str):
+        """Archive memories replaced by a newer memory."""
+        for memory_id in memory_ids:
+            if not memory_id or memory_id == superseded_by:
+                continue
+            try:
+                self.qdrant.set_payload(
+                    collection_name="mem0",
+                    payload=inactive_payload(
+                        ARCHIVED,
+                        superseded_by=superseded_by,
+                    ),
+                    points=[memory_id],
+                )
+                self.event_logger.log_event(
+                    event_type="memory_archived",
+                    agent_id="unknown",
+                    memory_id=memory_id,
+                    source="core._archive_superseded",
+                    metadata={"superseded_by": superseded_by},
+                )
+            except Exception as e:
+                logger.warning(f"Failed to archive superseded memory {memory_id}: {e}")
+
     def _increment_access_counts(self, memories: list[dict]):
         """Increment access_count metadata for retrieved memories."""
         for mem in memories:
@@ -550,7 +861,7 @@ class EnhancedMemory:
                 count = mem.get("metadata", {}).get("access_count", 0) + 1
                 self.qdrant.set_payload(
                     collection_name="mem0",
-                    payload={"access_count": count},
+                    payload={"access_count": count, "last_accessed_at": utc_now_iso()},
                     points=[mem["id"]],
                 )
             except Exception as e:

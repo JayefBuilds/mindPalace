@@ -18,6 +18,7 @@ from typing import Any
 
 from .config import EnhancedMemoryConfig
 from .core import EnhancedMemory
+from .lifecycle import is_active
 
 
 def _load_payload() -> dict[str, Any]:
@@ -153,11 +154,11 @@ def _ingest_turn(memory: EnhancedMemory, payload: dict[str, Any]) -> dict[str, A
         transcript_lines.append(f"Tool Output: {output}")
     transcript = "\n\n".join(transcript_lines)
 
-    existing = memory.mem0.get_all(agent_id=namespace_id, user_id=user_id)
+    existing = memory.mem0.get_all(filters={"agent_id": namespace_id, "user_id": user_id})
     existing_texts = [
         item["memory"]
         for item in existing.get("results", [])
-        if item.get("metadata", {}).get("status", "active") != "inactive"
+        if is_active(item)
     ]
     existing_fingerprints = {
         hashlib.sha256(_normalize_text(text).encode("utf-8")).hexdigest()
