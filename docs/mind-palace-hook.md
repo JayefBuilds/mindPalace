@@ -128,6 +128,27 @@ Payload schema logging defaults to on and records only field names/types, not va
 - `MINDPALACE_RECORD_PAYLOAD_SCHEMAS=true`
 - `MINDPALACE_HOOK_SCHEMA_LOG=~/.mem0/mind_palace_payload_schemas.jsonl`
 
+## Auth And Gateway Isolation
+
+Mind Palace Hook and `scripts/start-mcp.sh` intentionally scrub inherited `ANTHROPIC_BASE_URL` by default so Claude Code or Codex host-level gateways do not leak into memory extraction. Configure auth in the Mind Palace repo `.env` or explicit MCP env with one of:
+
+- `ANTHROPIC_API_KEY`
+- `CLAUDE_CODE_OAUTH_TOKEN`
+- `PERSONAL_ANTHROPIC_API_KEY`
+- `MEM0_LLM_PROVIDER=ollama`
+
+Only opt into a custom Anthropic-compatible proxy with:
+
+```sh
+MINDPALACE_ANTHROPIC_BASE_URL=https://your-proxy.example
+```
+
+Or allow an inherited base URL explicitly with:
+
+```sh
+MINDPALACE_ALLOW_ANTHROPIC_BASE_URL=true
+```
+
 ## Privacy
 
 Before recall or queued extraction, the hook redacts common token/password patterns and truncates large conversations. Tune with:

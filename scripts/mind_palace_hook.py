@@ -79,6 +79,7 @@ TRIVIAL_PROMPTS = {
 
 def main() -> int:
     load_dotenv(ROOT / ".env")
+    scrub_anthropic_base_url()
     raw = sys.stdin.read()
     payload = load_payload(raw)
     response = handle_payload(payload)
@@ -231,6 +232,7 @@ def handle_stop(
 
 
 def build_memory() -> Any:
+    scrub_anthropic_base_url()
     sys.path.insert(0, str(ROOT / "src"))
     from mem0_enhanced.config import EnhancedMemoryConfig
     from mem0_enhanced.core import EnhancedMemory
@@ -659,6 +661,17 @@ def payload_schema(value: Any, depth: int = 0) -> Any:
         return [payload_schema(value[0], depth + 1)]
     return type(value).__name__
 
+
+
+def scrub_anthropic_base_url() -> None:
+    """Keep host-level Claude gateways from leaking into Mind Palace calls."""
+    override = os.getenv("MINDPALACE_ANTHROPIC_BASE_URL", "").strip()
+    if override:
+        os.environ["ANTHROPIC_BASE_URL"] = override
+        return
+    if env_flag("ALLOW_ANTHROPIC_BASE_URL", default=False):
+        return
+    os.environ.pop("ANTHROPIC_BASE_URL", None)
 
 def hook_env(suffix: str, default: str) -> str:
     return (

@@ -1,6 +1,7 @@
 """Tests for the Mind Palace hook runner."""
 
 from pathlib import Path
+import os
 import sys
 
 import pytest
@@ -221,3 +222,22 @@ def test_stop_signals_mode_writes_when_signal_present(monkeypatch):
 
     assert response == {}
     assert fake.end_session_calls[0]["agent_id"] == "test-agent"
+
+
+def test_scrub_anthropic_base_url_removes_inherited_gateway(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://ai-gateway.example.test")
+    monkeypatch.delenv("MINDPALACE_ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("MINDPALACE_ALLOW_ANTHROPIC_BASE_URL", "false")
+
+    hook.scrub_anthropic_base_url()
+
+    assert "ANTHROPIC_BASE_URL" not in os.environ
+
+
+def test_scrub_anthropic_base_url_allows_explicit_override(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://ai-gateway.example.test")
+    monkeypatch.setenv("MINDPALACE_ANTHROPIC_BASE_URL", "https://proxy.example.test")
+
+    hook.scrub_anthropic_base_url()
+
+    assert os.environ["ANTHROPIC_BASE_URL"] == "https://proxy.example.test"
