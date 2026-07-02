@@ -113,44 +113,127 @@ def main():
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Mind Palace Inspection Report</title>
+  <title>Mind Palace · Inspection Report</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px; color: #1f2937; }}
-    h1, h2 {{ margin-bottom: 8px; }}
-    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 20px 0; }}
-    .metric {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #f9fafb; }}
-    .metric b {{ display: block; font-size: 24px; }}
-    .panel {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin: 16px 0; background: #ffffff; }}
-    .filters {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; align-items: end; }}
-    label {{ display: grid; gap: 4px; font-size: 12px; font-weight: 600; color: #4b5563; }}
-    select, input {{ width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 6px; padding: 8px; font: inherit; background: white; }}
-    button {{ border: 1px solid #d1d5db; border-radius: 6px; padding: 8px 10px; font: inherit; background: #f9fafb; cursor: pointer; }}
-    button:hover {{ background: #f3f4f6; }}
-    .count {{ color: #6b7280; font-size: 13px; margin: 8px 0 0; }}
-    table {{ width: 100%; border-collapse: collapse; margin: 16px 0 32px; table-layout: fixed; }}
-    th, td {{ border-bottom: 1px solid #e5e7eb; padding: 8px; vertical-align: top; text-align: left; }}
-    th {{ font-size: 12px; text-transform: uppercase; color: #6b7280; }}
-    code {{ font-size: 12px; }}
-    pre {{ margin: 0; white-space: pre-wrap; font-size: 12px; }}
+    :root {{
+      --bg: #F5EFE4; --surface: #EDE4D3; --ink: #1C1A15; --body: #3A3528;
+      --muted: #7A7060; --accent: #B8732A; --accent-deep: #96591D; --gold: #E8C88A;
+      --border: #D4C8B0; --hairline: #E8E0CC;
+      --serif: 'Playfair Display', Georgia, serif;
+      --sans: 'Inter', system-ui, sans-serif;
+      --mono: 'JetBrains Mono', 'Courier New', monospace;
+    }}
+    * {{ box-sizing: border-box; }}
+    html {{ scroll-behavior: smooth; }}
+    body {{
+      font-family: var(--sans); color: var(--body); margin: 0;
+      background: var(--bg);
+      background-image:
+        radial-gradient(1200px 600px at 80% -10%, rgba(184,115,42,0.06), transparent 60%),
+        linear-gradient(rgba(28,26,21,0.018) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(28,26,21,0.018) 1px, transparent 1px);
+      background-size: 100% 100%, 32px 32px, 32px 32px;
+      -webkit-font-smoothing: antialiased;
+    }}
+    .wrap {{ max-width: none; margin: 0 auto; padding: 64px clamp(40px, 5vw, 96px) 96px; }}
+
+    /* Hero */
+    .hero {{ position: relative; padding: 48px 0 40px; border-bottom: 1px solid var(--border); margin-bottom: 48px; }}
+    .eyebrow {{ font-family: var(--mono); font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+      color: var(--accent); margin: 0 0 16px; }}
+    .eyebrow::before {{ content: "§ "; opacity: 0.7; }}
+    h1 {{ font-family: var(--serif); font-weight: 700; font-size: 60px; line-height: 1.04;
+      letter-spacing: -1px; color: var(--ink); margin: 0 0 12px; }}
+    .tagline {{ font-family: var(--serif); font-weight: 400; font-style: italic; font-size: 22px;
+      color: var(--muted); margin: 0 0 24px; }}
+    .filter-pill {{ display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono);
+      font-size: 13px; color: var(--body); background: var(--surface); border: 1px solid var(--border);
+      border-radius: 999px; padding: 6px 14px; }}
+    .filter-pill b {{ color: var(--accent); font-weight: 500; }}
+
+    h2 {{ font-family: var(--serif); font-weight: 700; font-size: 32px; letter-spacing: -0.5px;
+      color: var(--ink); margin: 56px 0 4px; }}
+    .section-label {{ font-family: var(--mono); font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+      color: var(--muted); margin: 0 0 24px; }}
+    .section-label::before {{ content: "§ "; color: var(--accent); }}
+
+    /* Metrics */
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px;
+      background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 0; }}
+    .metric {{ padding: 20px 18px; background: var(--surface); position: relative; transition: background 0.2s ease; }}
+    .metric:hover {{ background: #F0E8D9; }}
+    .metric span {{ font-family: var(--mono); font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+      color: var(--muted); display: block; margin-bottom: 8px; }}
+    .metric b {{ display: block; font-family: var(--serif); font-size: 34px; font-weight: 700; color: var(--ink); line-height: 1; }}
+    .metric.is-ok b {{ color: var(--accent); }}
+    .metric.is-bad b {{ color: #9b3a2a; }}
+
+    /* Panels */
+    .panel {{ border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; margin: 20px 0 0; background: var(--surface); }}
+    .filters {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; align-items: end; }}
+    label {{ display: grid; gap: 6px; font-family: var(--mono); font-size: 11px; font-weight: 500;
+      letter-spacing: 0.5px; text-transform: uppercase; color: var(--muted); }}
+    select, input {{ width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px;
+      font-family: var(--sans); font-size: 14px; color: var(--body); background: var(--bg);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease; }}
+    select:focus, input:focus {{ outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(184,115,42,0.12); }}
+    button {{ border: 1px solid var(--accent); border-radius: 6px; padding: 9px 16px;
+      font-family: var(--mono); font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase;
+      color: var(--accent); background: transparent; cursor: pointer; transition: all 0.15s ease; }}
+    button:hover {{ background: var(--accent); color: var(--bg); }}
+    .count {{ font-family: var(--mono); color: var(--muted); font-size: 12px; margin: 14px 0 0; }}
+    .count b {{ color: var(--accent); font-weight: 500; }}
+
+    /* Tables */
+    table {{ width: 100%; border-collapse: collapse; margin: 20px 0 0; table-layout: fixed;
+      border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }}
+    thead {{ background: var(--ink); }}
+    th {{ font-family: var(--mono); font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+      color: var(--gold); padding: 14px 12px; text-align: left; font-weight: 500; }}
+    td {{ border-bottom: 1px solid var(--hairline); padding: 13px 12px; vertical-align: top; text-align: left;
+      font-size: 14px; line-height: 1.55; color: var(--body); }}
+    tbody tr {{ background: var(--bg); transition: background 0.12s ease; }}
+    tbody tr:nth-child(even) {{ background: #FAF6EC; }}
+    tbody tr:hover {{ background: var(--gold); }}
+    tbody tr:last-child td {{ border-bottom: none; }}
+    code {{ font-family: var(--mono); font-size: 12px; color: var(--accent-deep);
+      background: rgba(184,115,42,0.08); padding: 2px 6px; border-radius: 4px; }}
+    pre {{ margin: 0; white-space: pre-wrap; font-family: var(--mono); font-size: 12px; color: var(--body); }}
+
+    footer {{ margin-top: 72px; padding-top: 24px; border-top: 1px solid var(--border);
+      font-family: var(--mono); font-size: 12px; color: var(--muted); display: flex;
+      justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }}
+    footer .mark {{ font-family: var(--serif); font-weight: 700; font-size: 16px; color: var(--accent); font-style: normal; }}
   </style>
 </head>
 <body>
-  <h1>Mind Palace Inspection Report</h1>
-  <p>Agent filter: <code>{esc(args.agent or 'all')}</code></p>
+  <div class="wrap">
+  <header class="hero">
+    <p class="eyebrow">Inspection Report</p>
+    <h1>Mind Palace</h1>
+    <p class="tagline">The palace has many rooms. Each one persists.</p>
+    <span class="filter-pill">agent scope · <b>{esc(args.agent or 'all rooms')}</b></span>
+  </header>
 
   <h2>Health</h2>
+  <p class="section-label">System Vitals</p>
   <div class="grid">
-    <div class="metric"><span>Qdrant</span><b>{esc('ok' if health['qdrant']['ok'] else 'error')}</b></div>
-    <div class="metric"><span>Ollama</span><b>{esc('ok' if health['ollama']['ok'] else 'error')}</b></div>
-    <div class="metric"><span>Graph</span><b>{esc('connected' if health['graph']['connected'] else 'off/error')}</b></div>
+    <div class="metric {esc('is-ok' if health['qdrant']['ok'] else 'is-bad')}"><span>Qdrant</span><b>{esc('ok' if health['qdrant']['ok'] else 'error')}</b></div>
+    <div class="metric {esc('is-ok' if health['ollama']['ok'] else 'is-bad')}"><span>Ollama</span><b>{esc('ok' if health['ollama']['ok'] else 'error')}</b></div>
+    <div class="metric {esc('is-ok' if health['graph']['connected'] else 'is-bad')}"><span>Graph</span><b>{esc('linked' if health['graph']['connected'] else 'off')}</b></div>
     <div class="metric"><span>Scanned</span><b>{esc(health['memories']['scanned'])}</b></div>
     <div class="metric"><span>Active</span><b>{esc(health['memories']['active'])}</b></div>
     <div class="metric"><span>Archived</span><b>{esc(health['memories']['archived'])}</b></div>
     <div class="metric"><span>Pruned</span><b>{esc(health['memories']['pruned'])}</b></div>
-    <div class="metric"><span>Missing vector</span><b>{esc(health['memories']['missing_vector'])}</b></div>
+    <div class="metric"><span>No vector</span><b>{esc(health['memories']['missing_vector'])}</b></div>
   </div>
 
   <h2>Memories</h2>
+  <p class="section-label">Stored Recollections</p>
   <div class="panel">
     <div class="filters" data-table="memories-table">
       <label>Agent<select data-filter="agent"><option value="">All agents</option></select></label>
@@ -168,6 +251,7 @@ def main():
   </table>
 
   <h2>Recent Events</h2>
+  <p class="section-label">Activity Ledger</p>
   <div class="panel">
     <div class="filters" data-table="events-table">
       <label>Agent<select data-filter="agent"><option value="">All agents</option></select></label>
@@ -257,6 +341,12 @@ def main():
       applyFilters(panel);
     }});
   </script>
+
+  <footer>
+    <span class="mark">Mind Palace</span>
+    <span>Not magic — architecture.</span>
+  </footer>
+  </div>
 </body>
 </html>
 """,
